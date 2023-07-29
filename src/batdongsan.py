@@ -3,7 +3,7 @@ from pathlib import Path
 
 import typed_argparse as tap
 
-from src.batdongsan_crawler import BatDongSanCrawler
+from batdongsan_crawler import BatDongSanCrawler
 
 global_crawler = BatDongSanCrawler()
 
@@ -61,6 +61,9 @@ class CrawlArgs(tap.TypedArgs):
     max_result: int = tap.arg(
         help="Maximum number of result for one scrape. 0 for infinity", default=100
     )
+    start_page: int = tap.arg(
+        help="Continue searching from this page instead of the first page", default=1
+    )
 
     output_path: Path = tap.arg(help="Result output path")
 
@@ -94,6 +97,7 @@ def crawl_runner(args: CrawlArgs):
         args.n_rooms,
         args.directions,
         args.max_result,
+        args.start_page,
         args.output_path,
         args.debug,
         not args.no_use_request,

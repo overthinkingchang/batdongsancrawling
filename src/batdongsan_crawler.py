@@ -1,9 +1,7 @@
-import datetime
 import math
 import os
 import typing
 from pathlib import Path
-from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -72,47 +70,6 @@ class BatDongSanCrawler:
 
         self.area_map = self.__get_area_map()
         logger.debug("Area map {}.", self.area_map)
-
-    def __get(self, path: str, use_request: bool):
-        target_url = self.target_endpoint + "/" + path.lstrip("/")
-        if use_request:
-            r = self.session.get(target_url)
-            r.raise_for_status()
-            return r.content
-        else:
-            r = requests.post(
-                self.proxy_endpoint,
-                json={
-                    "cmd": "request.get",
-                    "url": target_url,
-                    "session": self.session_id,
-                    "maxTimeout": 60000,
-                },
-                timeout=60,
-            )
-            r.raise_for_status()
-            return r.json()["solution"]["response"]
-
-    def __post(self, path: str, data: dict, use_request: bool):
-        target_url = self.target_endpoint + "/" + path.lstrip("/")
-        if use_request:
-            r = self.session.post(target_url, data=data)
-            r.raise_for_status()
-            return r.content
-        else:
-            r = requests.post(
-                self.proxy_endpoint,
-                json={
-                    "cmd": "request.post",
-                    "url": target_url,
-                    "session": self.session_id,
-                    "maxTimeout": 60000,
-                    "postData": urlencode(data),
-                },
-                timeout=60,
-            )
-            r.raise_for_status()
-            return r.json()["solution"]["response"]
 
     def __get_solution(self):
         r = requests.post(
@@ -206,11 +163,7 @@ class BatDongSanCrawler:
         max_result: int,
         output_path: Path,
         debug: bool,
-        use_request: bool,
     ):
-        output_dir = output_path.parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         n_rooms_str = []
         if n_rooms is not None:
             for n_room in n_rooms:
@@ -247,39 +200,20 @@ class BatDongSanCrawler:
 
         logger.info("Search data {}.", search_data)
 
-        res = self.__post(
-            "/microservice-architecture-router/Product/ProductSearch",
+        res = self.session.post(
+            self.target_endpoint
+            + "/microservice-architecture-router/Product/ProductSearch",
             data=search_data,
-            use_request=use_request,
         )
 
         max_result_real = max_result or math.inf
         results = []
 
         while len(results) < max_result_real:
-            soup = BeautifulSoup(res, "lxml")
-            if soup.select("div.re__srp-empty.js__srp-empty"):
-                logger.warning("No result found.")
-                break
-
-            # Sometime, `js__product-link-for-product-id` also contains
-            # the suggestions, not the real results, especially when the
-            # number of real results is too small or zero.
-            # So we will first check if there are any real result (as above)
-            # and select the first element of `js__product-link-for-product-id`
-            # which will be a real result, then access its higher-level element and
-            # get all the `js__product-link-for-product-id` elements of that
-            # element which will guarantee to be the real results.
-
-            products_html = soup.find(
-                lambda tag: tag.name == "a"
-                and "class" in tag.attrs
-                and tag["class"] == ["js__product-link-for-product-id"]
-            ).parent.parent.find_all("a", "js__product-link-for-product-id")
-
-            results += [
-                self.__parse_html(product, output_dir) for product in products_html
-            ]
+            res.raise_for_status()
+            soup = BeautifulSoup(res.content, "lxml")
+            products_html = soup.find_all("a", "js__product-link-for-product-id")
+            results += [self.__parse_html(product) for product in products_html]
 
             if debug:
                 with open("{}.html".format(len(results)), "w") as f:
@@ -291,14 +225,15 @@ class BatDongSanCrawler:
             if not next_page_icon:
                 break
             next_page_path = next_page_icon.parent["href"]
-            res = self.__get(next_page_path, use_request=use_request)
+            res = self.session.get(self.target_endpoint + next_page_path)
 
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(results).to_csv(output_path, index=False)
 
     def __parse_number(self, content: str):
         return float(content.replace(".", "").replace(",", "."))
 
-    def __parse_html(self, item, output_dir: Path):
+    def __parse_html(self, item):
         data = {}
         data["id"] = item["data-product-id"]
         data["title"] = item.find("div", class_="re__card-info")["title"]
@@ -320,47 +255,5 @@ class BatDongSanCrawler:
         district, city = location_raw.text.split(", ")
         data["district"] = district
         data["city"] = city
-
-        date_str, month_str, year_str = item.find(
-            "span", class_="re__card-published-info-published-at"
-        )["aria-label"].split("/")
-        data["published_date"] = datetime.date(
-            int(year_str), int(month_str), int(date_str)
-        )
-
-        data["image_path"] = []
-
-        image_htmls = item.find("div", class_="re__card-image").find_all("img")
-        img_prefix = "https://file4.batdongsan.com.vn/"
-        for i, image_html in enumerate(image_htmls):
-            img_src = ""
-            if "src" in image_html.attrs:
-                img_src = image_html["src"]
-            elif "data-src" in image_html.attrs:
-                img_src = image_html["data-src"]
-            elif "data-img" in image_html.attrs:
-                img_src = image_html["data-img"]
-            else:
-                continue
-            # The cropped/resized image's url has the following form
-            # `https://file4.batdongsan.com.vn/crop/{size}/{time and filename}`
-            # `https://file4.batdongsan.com.vn/resize/{size}/{time and filename}`
-            # The original image could be found at
-            # `https://file4.batdongsan.com.vn/{time and filename}`
-            img_path_component = img_src.removeprefix(img_prefix).split(
-                "/", maxsplit=2
-            )  # ["crop/resize", "{size}", "{time and filename}"]
-            img_real_src = img_prefix + img_path_component[-1]
-            img_ext = img_real_src.rsplit(".", maxsplit=1)[-1]
-
-            r = requests.get(img_real_src)
-            r.raise_for_status()
-
-            img_local_name = "{}-{}.{}".format(data["id"], i + 1, img_ext)
-
-            with open(output_dir / img_local_name, "wb") as f:
-                f.write(r.content)
-
-            data["image_path"].append(img_local_name)
 
         return data
